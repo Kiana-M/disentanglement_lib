@@ -62,6 +62,9 @@ path_vae = os.path.join(base_path, "vae")
 # disentanglement_lib.methods.unsupervised.train module. To configure
 # training we need to provide a gin config. For a standard VAE, you may have a
 # look at model.gin on how to do this.
+gin_bindings = [
+    "encoder.encoder_fn = @caps_encoder"
+]
 train.train_with_gin(os.path.join(path_vae, "model"), overwrite, ["model.gin"])
 # After this command, you should have a `vae` subfolder with a model that was
 # trained for a few steps (in reality, you will want to train many more steps).
