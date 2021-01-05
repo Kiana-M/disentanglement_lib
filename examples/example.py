@@ -65,7 +65,7 @@ path_vae = os.path.join(base_path, "vae")
 gin_bindings = [
     "encoder.encoder_fn = @caps_encoder"
 ]
-train.train_with_gin(os.path.join(path_vae, "model"), overwrite, ["model.gin"])
+train.train_with_gin(os.path.join(path_vae, "model"), overwrite, ["model.gin"],gin_bindings)
 # After this command, you should have a `vae` subfolder with a model that was
 # trained for a few steps (in reality, you will want to train many more steps).
 
