@@ -205,6 +205,76 @@ def conv_encoder(input_tensor, num_latent, is_training=True):
   log_var = tf.layers.dense(e5, num_latent, activation=None, name="log_var")
   return means, log_var
 
+'''
+begin caps
+'''
+@gin.configurable("caps_encoder", whitelist=[])
+def caps_encoder(input_tensor, num_latent, is_training=True):
+  """Capsul encoder used in capsule_VAE and Capsule_beta-VAE 
+
+  Based on row 3 of Table 1 on page 13 of "beta-VAE: Learning Basic Visual
+  Concepts with a Constrained Variational Framework"
+  (https://openreview.net/forum?id=Sy2fzU9gl)
+
+  Args:
+    input_tensor: Input tensor of shape (batch_size, 64, 64, num_channels) to
+      build encoder on.
+    num_latent: Number of latent variables to output.
+    is_training: Whether or not the graph is built for training (UNUSED).
+
+  Returns:
+    means: Output tensor of shape (batch_size, num_latent) with latent variable
+      means.
+    log_var: Output tensor of shape (batch_size, num_latent) with latent
+      variable log variances.
+  """
+  del is_training
+
+  e1 = tf.layers.conv2d(
+      inputs=input_tensor,
+      filters=32,
+      kernel_size=4,
+      strides=2,
+      activation=tf.nn.relu,
+      padding="same",
+      name="e1",
+  )
+  e2 = tf.layers.conv2d(
+      inputs=e1,
+      filters=32,
+      kernel_size=4,
+      strides=2,
+      activation=tf.nn.relu,
+      padding="same",
+      name="e2",
+  )
+  e3 = tf.layers.conv2d(
+      inputs=e2,
+      filters=64,
+      kernel_size=2,
+      strides=2,
+      activation=tf.nn.relu,
+      padding="same",
+      name="e3",
+  )
+  e4 = tf.layers.conv2d(
+      inputs=e3,
+      filters=64,
+      kernel_size=2,
+      strides=2,
+      activation=tf.nn.relu,
+      padding="same",
+      name="e4",
+  )
+  flat_e4 = tf.layers.flatten(e4)
+  e5 = tf.layers.dense(flat_e4, 256, activation=tf.nn.relu, name="e5")
+  means = tf.layers.dense(e5, num_latent, activation=None, name="means")
+  log_var = tf.layers.dense(e5, num_latent, activation=None, name="log_var")
+  return means, log_var
+  
+  '''
+  end of caps
+  '''
 
 @gin.configurable("fc_decoder", whitelist=[])
 def fc_decoder(latent_tensor, output_shape, is_training=True):

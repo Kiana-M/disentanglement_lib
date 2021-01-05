@@ -28,6 +28,7 @@ class ArchitecturesTest(parameterized.TestCase, tf.test.TestCase):
   @parameterized.named_parameters(
       ('fc_encoder', architectures.fc_encoder),
       ('conv_encoder', architectures.conv_encoder),
+      ('caps_encoder', architectures.caps_encoder),
   )
   def test_encoder(self, encoder_f):
     minibatch = np.ones(shape=(10, 64, 64, 1), dtype=np.float32)
