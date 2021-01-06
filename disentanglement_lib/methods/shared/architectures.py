@@ -248,8 +248,8 @@ def caps_encoder(input_tensor, num_latent, is_training=True):
       activation=tf.nn.relu,
       padding="same",
       name="e2",
-  '''
   )
+  '''
   e3 = tf.layers.conv2d(
       inputs=e1,
       filters=64,
