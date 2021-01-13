@@ -20,6 +20,172 @@ from __future__ import print_function
 import numpy as np
 import tensorflow.compat.v1 as tf
 import gin.tf
+#for CapsuleNet:
+from tensorflow.keras import backend as K
+from tensorflow.keras.layers import Layer
+from tensorflow.keras import activations
+from tensorflow.keras import utils
+
+#requirements for caps encoder:
+
+# the squashing function.
+# we use 0.5 in stead of 1 in hinton's paper.
+# if 1, the norm of vector will be zoomed out.
+# if 0.5, the norm will be zoomed in while original norm is less than 0.5
+# and be zoomed out while original norm is greater than 0.5.
+def squash(x, axis=-1):
+    s_squared_norm = K.sum(K.square(x), axis, keepdims=True) + K.epsilon()
+    scale = K.sqrt(s_squared_norm) / (0.5 + s_squared_norm)
+    return scale * x
+
+# define our own softmax function instead of K.softmax
+# because K.softmax can not specify axis.
+def softmax(x, axis=-1):
+    ex = K.exp(x - K.max(x, axis=axis, keepdims=True))
+    return ex / K.sum(ex, axis=axis, keepdims=True)
+
+# define the margin loss like hinge loss
+def margin_loss(y_true, y_pred):
+    lamb, margin = 0.5, 0.1
+    return K.sum(y_true * K.square(K.relu(1 - margin - y_pred)) + lamb * (
+        1 - y_true) * K.square(K.relu(y_pred - margin)), axis=-1)
+    
+class Mask(Layer):
+    """
+    Mask a Tensor with shape=[None, num_capsule, dim_vector] either by the capsule with max length or by an additional 
+    input mask. Except the max-length capsule (or specified capsule), all vectors are masked to zeros. Then flatten the
+    masked Tensor.
+    For example:
+        ```
+        x = keras.layers.Input(shape=[8, 3, 2])  # batch_size=8, each sample contains 3 capsules with dim_vector=2
+        y = keras.layers.Input(shape=[8, 3])  # True labels. 8 samples, 3 classes, one-hot coding.
+        out = Mask()(x)  # out.shape=[8, 6]
+        # or
+        out2 = Mask()([x, y])  # out2.shape=[8,6]. Masked with true labels y. Of course y can also be manipulated.
+        ```
+    """
+    def call(self, inputs, **kwargs):
+        if type(inputs) is list:  # true label is provided with shape = [None, n_classes], i.e. one-hot code.
+            assert len(inputs) == 2
+            inputs, mask = inputs
+        else:  # if no true label, mask by the max length of capsules. Mainly used for prediction
+            # compute lengths of capsules
+            x = K.sqrt(K.sum(K.square(inputs), -1))
+            # generate the mask which is a one-hot code.
+            # mask.shape=[None, n_classes]=[None, num_capsule]
+            mask = K.one_hot(indices=K.argmax(x, 1), num_classes=x.get_shape().as_list()[1])
+
+        # inputs.shape=[None, num_capsule, dim_capsule]
+        # mask.shape=[None, num_capsule]
+        # masked.shape=[None, num_capsule * dim_capsule]
+        masked = inputs * K.expand_dims(mask, -1)
+        return masked
+
+    def compute_output_shape(self, input_shape):
+        if type(input_shape[0]) is tuple:  # true label provided
+            return tuple([None, input_shape[0][1] * input_shape[0][2]])
+        else:  # no true label provided
+            return tuple([None, input_shape[1] * input_shape[2]])
+
+    def get_config(self):
+        config = super(Mask, self).get_config()
+        return config
+
+class Capsule(Layer):
+    """A Capsule Implement with Pure Keras
+    There are two vesions of Capsule.
+    One is like dense layer (for the fixed-shape input),
+    and the other is like timedistributed dense (for various length input).
+
+    The input shape of Capsule must be (batch_size,
+                                        input_num_capsule,
+                                        input_dim_capsule
+                                       )
+    and the output shape is (batch_size,
+                             num_capsule,
+                             dim_capsule
+                            )
+
+    Capsule Implement is from https://github.com/bojone/Capsule/
+    Capsule Paper: https://arxiv.org/abs/1710.09829
+    """
+
+    def __init__(self,
+                 num_capsule,
+                 dim_capsule,
+                 routings=3,
+                 share_weights=True,
+                 activation='squash',
+                 **kwargs):
+        super(Capsule, self).__init__(**kwargs)
+        self.num_capsule = num_capsule
+        self.dim_capsule = dim_capsule
+        self.routings = routings
+        self.share_weights = share_weights
+        if activation == 'squash':
+            self.activation = squash
+        else:
+            self.activation = activations.get(activation)
+
+    def build(self, input_shape):
+        input_dim_capsule = input_shape[-1]
+        if self.share_weights:
+            self.kernel = self.add_weight(
+                name='capsule_kernel',
+                shape=(1, input_dim_capsule,
+                       self.num_capsule * self.dim_capsule),
+                initializer='glorot_uniform',
+                trainable=True)
+        else:
+            input_num_capsule = input_shape[-2]
+            self.kernel = self.add_weight(
+                name='capsule_kernel',
+                shape=(input_num_capsule, input_dim_capsule,
+                       self.num_capsule * self.dim_capsule),
+                initializer='glorot_uniform',
+                trainable=True)
+
+    def call(self, inputs):
+        """Following the routing algorithm from Hinton's paper,
+        but replace b = b + <u,v> with b = <u,v>.
+
+        This change can improve the feature representation of Capsule.
+
+        However, you can replace
+            b = K.batch_dot(outputs, hat_inputs, [2, 3])
+        with
+            b += K.batch_dot(outputs, hat_inputs, [2, 3])
+        to realize a standard routing.
+        """
+
+        if self.share_weights:
+            hat_inputs = K.conv1d(inputs, self.kernel)
+        else:
+            hat_inputs = K.local_conv1d(inputs, self.kernel, [1], [1])
+
+        batch_size = K.shape(inputs)[0]
+        input_num_capsule = K.shape(inputs)[1]
+        hat_inputs = K.reshape(hat_inputs, 
+                               (batch_size, input_num_capsule,
+                                self.num_capsule, self.dim_capsule))
+        hat_inputs = K.permute_dimensions(hat_inputs, (0, 2, 1, 3))
+
+        b = K.zeros_like(hat_inputs[:, :, :, 0])
+        for i in range(self.routings):
+            c = softmax(b, 1)
+            o = self.activation(K.batch_dot(c, hat_inputs, [2, 2]))
+            if i < self.routings - 1:
+                b = K.batch_dot(o, hat_inputs, [2, 3])
+                if K.backend() == 'theano':
+                    o = K.sum(o, axis=1)
+
+        return o
+
+    def compute_output_shape(self, input_shape):
+        return (None, self.num_capsule, self.dim_capsule)
+
+
+#end of requirements for capsnet
 
 
 @gin.configurable("encoder", whitelist=["num_latent", "encoder_fn"])
@@ -230,50 +396,50 @@ def caps_encoder(input_tensor, num_latent, is_training=True):
   """
   del is_training
 
-  e1 = tf.layers.conv2d(
-      inputs=input_tensor,
-      filters=32,
-      kernel_size=4,
-      strides=2,
-      activation=tf.nn.relu,
-      padding="same",
-      name="e1",
-  )
-  '''
-  e2 = tf.layers.conv2d(
-      inputs=e1,
-      filters=32,
-      kernel_size=4,
-      strides=2,
-      activation=tf.nn.relu,
-      padding="same",
-      name="e2",
-  )
-  '''
-  e3 = tf.layers.conv2d(
-      inputs=e1,
-      filters=64,
-      kernel_size=2,
-      strides=2,
-      activation=tf.nn.relu,
-      padding="same",
-      name="e3",
-  )
-  e4 = tf.layers.conv2d(
-      inputs=e3,
-      filters=64,
-      kernel_size=2,
-      strides=2,
-      activation=tf.nn.relu,
-      padding="same",
-      name="e4",
-  )
+  input_image = Input(shape=(None, None, 1), name='capsule_input')
+  Flat_input=Flatten(name='input_flattener')(input_image)
+
+  # Layer 1: Just a conventional Conv2D layer
+  conv1 = Conv2D(256, (9,9), activation='relu', name='conv1')(input_image)
+
+  """now we reshape it as (batch_size, input_num_capsule, input_dim_capsule)
+  then connect a Capsule layer.
+
+  the output of final model is the lengths of 10 Capsule, whose dim=16.
+
+  the length of Capsule is the proba,
+  so the problem becomes a 10 two-classification problem.
+  """
+
+  conv_out = Reshape((-1, 256))(conv1)
+  capsule = Capsule(10, 16, 3, True)(conv_out)
+
+
+  # Here we mask the digit caps by the true label
+  masked_by_y = Mask(name='mask_layer')([capsule, label_layer])
+  #masked_by_y_flat=Flatten()(masked_by_y)
+
+
+  outputCapsule = Lambda(lambda z: K.sqrt(K.sum(K.square(z), 2)))(capsule)
+  rsh=Flatten()(masked_by_y)
+  x = Dense(intermediate_dim, activation='relu')(rsh)
+  z_mean = Dense(latent_dim, name='z_mean')(x)
+  z_log_var = Dense(latent_dim, name='z_log_var')(x)
+
+  # use reparameterization trick to push the sampling out as input
+  # note that "output_shape" isn't necessary with the TensorFlow backend
+  z = Lambda(sampling, output_shape=(latent_dim,), name='z')([z_mean, z_log_var])
+
+  # instantiate encoder model
+  encoder = Model([input_image, label_layer], [z_mean, z_log_var, z], name='encoder')
+  encoder.summary()
+'''
   flat_e4 = tf.layers.flatten(e4)
   e5 = tf.layers.dense(flat_e4, 256, activation=tf.nn.relu, name="e5")
   means = tf.layers.dense(e5, num_latent, activation=None, name="means")
   log_var = tf.layers.dense(e5, num_latent, activation=None, name="log_var")
   return means, log_var
-  
+'''
   '''
   end of caps
   '''
